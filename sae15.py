@@ -8,7 +8,7 @@ import markdown
 import webbrowser
 import os
 
-#Configuration des ports courants
+#configuration
 PORT_MAP = {
     '80': 'HTTP', '443': 'HTTPS', '8080': 'HTTP-ALT',
     '20': 'FTP-DATA', '21': 'FTP',
@@ -16,10 +16,11 @@ PORT_MAP = {
     '25': 'SMTP', '53': 'DNS',
     '110': 'POP3', '143': 'IMAP',
     '3306': 'MySQL', '3389': 'RDP',
-    '445': 'SMB', '139': 'NetBIOS'
+    '445': 'SMB', '139': 'NetBIOS',
+    '1900': 'SSDP', '67': 'DHCP', '68': 'DHCP'
 }
 
-INSECURE_PROTOCOLS = ['TELNET', 'FTP', 'HTTP', 'POP3']
+INSECURE_PROTOCOLS = ['TELNET', 'FTP', 'HTTP', 'POP3', 'VNC']
 
 FLAG_MEANINGS = {
     'S': 'Initialisation (SYN)\n-> Tentative de connexion',
@@ -27,111 +28,181 @@ FLAG_MEANINGS = {
     '.': 'Accusé (ACK)\n-> Trafic normal',
     'P.': 'Données (PSH)\n-> Transfert d\'infos',
     'F.': 'Fin (FIN)\n-> Clôture propre',
-    'R': 'Rejet (RST)\n-> Connexion refusée'
+    'R': 'Rejet (RST)\n-> Connexion refusée',
+    'Req': 'Requête (ARP)',
+    'Rep': 'Réponse (ARP)'
 }
 
+
 def get_protocol_name(port_str, info_line=""):
+    """Détermine le nom du protocole en fonction du port ou du contenu de la ligne."""
+    info_line = info_line.upper()
+    port_str = str(port_str).upper()
+
+    if "ARP" in info_line or port_str == "ARP": return "ARP"
+    if "STP" in info_line or "802.1W" in info_line: return "STP"
+    if "HSRP" in info_line: return "HSRP"
+    if "BOOTP" in info_line or "DHCP" in info_line: return "DHCP"
+    if "NETBIOS" in port_str or "NETBIOS" in info_line: return "NETBIOS"
+    if "SSDP" in info_line: return "SSDP"
+
     explicit_proto = re.search(r':\s+([A-Z]{3,10})$', info_line.strip())
     if explicit_proto:
         return explicit_proto.group(1)
 
     port_lower = port_str.lower()
-    for p_name in ['http', 'ssh', 'dns', 'telnet', 'ftp', 'smtp', 'https', 'mysql']:
+    for p_name in ['http', 'ssh', 'dns', 'telnet', 'ftp', 'smtp', 'https', 'mysql', 'rdp', 'vnc']:
         if p_name in port_lower:
             return p_name.upper()
 
     if port_str.isdigit():
         return PORT_MAP.get(port_str, f"TCP/{port_str}")
     
-    return port_str.upper()
+    return port_str if port_str != "0" else "IP-General"
 
-#Fichier csv
 def parse_tcpdump(filepath):
+    """Lit le fichier tcpdump en ignorant le bruit hexadécimal et les balises sources."""
     data = []
-    pattern_base = re.compile(r'^(\d{2}:\d{2}:\d{2}\.\d+)\s+IP\s+([\w\.-]+)\s+>\s+([\w\.-]+):\s+(.*)')
+    
+    #csv
+    pattern_generic = re.compile(r'.*?(\d{2}:\d{2}:\d{2}\.\d+)\s+([A-Za-z0-9\.-]+)(?:,\s+|\s+)(.*)')
     pattern_flags = re.compile(r'Flags\s+\[([^\s\]]+)\]')
 
     try:
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 line = line.strip()
-                match = pattern_base.match(line)
+
+                if not line or line.startswith('0x') or len(line) < 15:
+                    continue
+                
+                if line.startswith('[source'):
+                    if ']' in line:
+                        line = line.split(']', 1)[1].strip()
+                    else:
+                        continue 
+
+                match = pattern_generic.search(line)
                 if match:
-                    h, src_full, dst_full, info = match.groups()
+                    timestamp, type_proto, info = match.groups()
                     
-                    s_parts = src_full.rsplit('.', 1)
-                    s_ip, s_p = (s_parts[0], s_parts[1]) if len(s_parts) > 1 else (src_full, "0")
+                    src_ip, src_port = "Inconnu", "0"
+                    dst_ip, dst_port = "Broadcast", "0"
+                    proto = "TCP"
+                    flags = "N/A"
 
-                    d_parts = dst_full.rsplit('.', 1)
-                    d_ip, d_p = (d_parts[0], d_parts[1]) if len(d_parts) > 1 else (dst_full, "0")
-                    
-                    proto = get_protocol_name(d_p, info)
-                    if proto.startswith("TCP/") and not get_protocol_name(s_p).startswith("TCP/"):
-                        proto = get_protocol_name(s_p)
+                    if type_proto == "IP":
+                        if ' > ' in info:
+                            parts = info.split(' > ')
+                            src_full = parts[0].strip()
+                            rest = parts[1]
+                            
+                            if ':' in rest:
+                                dst_full, info_text = rest.split(':', 1)
+                            else:
+                                dst_full, info_text = rest, ""
 
-                    flag_match = pattern_flags.search(info)
-                    flags_found = flag_match.group(1) if flag_match else "N/A"
-                    
+                            s_parts = src_full.rsplit('.', 1)
+                            src_ip, src_port = (s_parts[0], s_parts[1]) if len(s_parts) > 1 else (src_full, "0")
+
+                            d_parts = dst_full.rsplit('.', 1)
+                            dst_ip, dst_port = (d_parts[0], d_parts[1]) if len(d_parts) > 1 else (dst_full, "0")
+                            
+                            proto = get_protocol_name(dst_port, info_text)
+                            
+                            flag_match = pattern_flags.search(info_text)
+                            if flag_match: flags = flag_match.group(1)
+                        else:
+                            continue 
+
+                    elif type_proto == "ARP":
+                        proto = "ARP"
+                        if "who-has" in info:
+                            try:
+                                parts = info.split()
+                                if "who-has" in parts and "tell" in parts:
+                                    dst_ip = parts[parts.index("who-has") + 1]
+                                    src_ip = parts[parts.index("tell") + 1].strip(',')
+                                    flags = "Req"
+                            except: pass
+                        elif "is-at" in info:
+                            flags = "Reply"
+                            src_ip = "ARP-Reply"
+
+                    elif type_proto == "STP":
+                        proto = "STP"
+                        src_ip = "Switch-Bridge"
+                        dst_ip = "Multicast"
+
+                    if src_ip == "Inconnu" and proto == "TCP":
+                        continue
+
                     data.append({
-                        "Heure": h,
-                        "Source": s_ip,
-                        "Port_Source": s_p,
-                        "Destination": d_ip,
-                        "Port_Dest": d_p,
+                        "Heure": timestamp,
+                        "Source": src_ip,
+                        "Port_Source": src_port,
+                        "Destination": dst_ip,
+                        "Port_Dest": dst_port,
                         "Protocole": proto,
-                        "Flags": flags_found
+                        "Flags": flags
                     })
         return data
     except Exception as e:
         messagebox.showerror("Erreur", f"Lecture échouée : {e}")
         return []
 
-#Analyse des risques
+#Risque
 def analyze_security(df):
     alerts = []
     insecure = df[df['Protocole'].isin(INSECURE_PROTOCOLS)]
     if not insecure.empty:
-        alerts.append(f"<li><b>ALERTE CONFIDENTIALITÉ :</b> {len(insecure)} paquets utilisent des protocoles non chiffrés ({', '.join(insecure['Protocole'].unique())}). Risque d'interception de données.</li>")
+        alerts.append(f"<li><b>ALERTE CONFIDENTIALITÉ :</b> {len(insecure)} paquets utilisent des protocoles non chiffrés ({', '.join(insecure['Protocole'].unique())}). Risque d'interception.</li>")
 
-    syn_count = len(df[df['Flags'].str.contains('S', na=False)])
+    syn_count = len(df[df['Flags'].astype(str).str.contains('S', na=False)])
     if syn_count > 50:
         alerts.append(f"<li><b>SUSPICION DE SCAN :</b> {syn_count} tentatives de connexions (SYN) détectées.</li>")
 
-    rst_count = len(df[df['Flags'].str.contains('R', na=False)])
+    rst_count = len(df[df['Flags'].astype(str).str.contains('R', na=False)])
     if rst_count > 20:
         alerts.append(f"<li><b>ANOMALIE FLUX :</b> {rst_count} connexions ont été brutalement rejetées (RST).</li>")
+
+    arp_count = len(df[df['Protocole'] == 'ARP'])
+    if arp_count > len(df) * 0.3:
+        alerts.append(f"<li><b>ACTIVITÉ ARP ÉLEVÉE :</b> {arp_count} paquets ARP détectés. Vérifier la stabilité du réseau local.</li>")
 
     if not alerts:
         alerts.append("<li>Aucune menace immédiate détectée par le moteur d'analyse.</li>")
 
     return "<ul>" + "".join(alerts) + "</ul>"
 
-#Graphiques
 def create_reports(csv_path, base_filename):
     try:
         df = pd.read_csv(csv_path, delimiter=';')
 
         plt.figure(figsize=(10, 5))
-        df['Source'].value_counts().head(7).plot(kind='pie', autopct='%1.1f%%', cmap='Pastel1')
+        if not df.empty:
+            df['Source'].value_counts().head(7).plot(kind='pie', autopct='%1.1f%%', cmap='Pastel1')
         plt.title("Répartition des Sources")
         plt.tight_layout(); plt.savefig("sources.png"); plt.close()
 
         plt.figure(figsize=(12, 6))
-        flag_counts = df['Flags'].value_counts().head(8)
-        labels = [FLAG_MEANINGS.get(x, x) for x in flag_counts.index]
-        colors = ['#e74c3c' if 'S' in x or 'R' in x else '#3498db' for x in flag_counts.index]
-        plt.bar(labels, flag_counts.values, color=colors)
-        plt.title("Analyse du Comportement TCP"); plt.tight_layout()
+        if not df.empty:
+            flag_counts = df['Flags'].value_counts().head(8)
+            labels = [FLAG_MEANINGS.get(x, x) for x in flag_counts.index]
+            colors = ['#e74c3c' if 'S' in str(x) or 'R' in str(x) else '#3498db' for x in flag_counts.index]
+            plt.bar(labels, flag_counts.values, color=colors)
+        plt.title("Analyse du Comportement (Flags)"); plt.tight_layout()
         plt.savefig("flags.png"); plt.close()
 
-        #Analyse des risques
+        # Analyse des risques
         risk_html = analyze_security(df)
 
-        #Markdown
+        # Markdown
         md_content = f"""
 # Rapport Sécurité Réseau
 **Fichier analysé :** `{base_filename}.txt`  
 **Date du scan :** {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}
+**Total Paquets :** {len(df)}
 
 ---
 
@@ -185,7 +256,6 @@ def create_reports(csv_path, base_filename):
         </style></head>
         <body><div class="container">{html_body}</div></body></html>"""
         
-        #HTML
         html_filename = f"{base_filename}.html"
         with open(html_filename, "w", encoding="utf-8") as f:
             f.write(html_final)
@@ -194,7 +264,8 @@ def create_reports(csv_path, base_filename):
     except Exception as e:
         messagebox.showerror("Erreur", str(e)); return None
 
-#Interface Tkinter
+#tkinter
+
 def process_file():
     path = filedialog.askopenfilename(filetypes=[("Logs TCPDump", "*.txt"), ("Tous", "*.*")])
     if path:
@@ -212,10 +283,12 @@ def process_file():
             if result_html:
                 messagebox.showinfo("Succès", f"Rapports générés : {base_name}.csv, .md et .html")
                 webbrowser.open('file://' + os.path.realpath(result_html))
+        else:
+            messagebox.showwarning("Attention", "Aucun paquet valide trouvé ou fichier vide.")
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("TCPDump")
+    root.title("TCPDump Analyzer Pro")
     root.geometry("400x250")
     tk.Label(root, text="Analyseur de Risques Réseau", font=("Arial", 14, "bold")).pack(pady=40)
     tk.Button(root, text="Importer & Analyser", command=process_file, bg="#3498db", fg="white", font=("Arial", 11), height=2, width=25).pack()
