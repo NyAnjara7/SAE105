@@ -215,7 +215,7 @@ def process_file():
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("CyberAudit - TCPDump")
+    root.title("TCPDump")
     root.geometry("400x250")
     tk.Label(root, text="Analyseur de Risques Réseau", font=("Arial", 14, "bold")).pack(pady=40)
     tk.Button(root, text="Importer & Analyser", command=process_file, bg="#3498db", fg="white", font=("Arial", 11), height=2, width=25).pack()
